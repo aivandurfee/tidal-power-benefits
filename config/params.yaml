@@ -4,7 +4,7 @@
 # -----------------------------------------------------------------------------
 
 # Analysis year and timezone (CAISO is in America/Los_Angeles)
-year: 2023
+year: 2024
 timezone: "America/Los_Angeles"
 
 # Input / output paths (relative to repo root)
@@ -35,10 +35,15 @@ time_slices:
   high_price_quantile: 0.90              # top 10% of hourly prices
 
 # -----------------------------------------------------------------------------
-# Data source toggles -- use mock data until real APIs are wired up.
+# Data source toggles
+#
+# caiso_use_mock: false  →  load real data from data/raw/CAISO_2024_combined.csv
+# caiso_use_mock: true   →  fall back to synthetic data (useful for CI / tests)
+#
+# noaa_use_mock stays true until a live NOAA API fetch is implemented.
 # -----------------------------------------------------------------------------
 sources:
   noaa_use_mock: true
-  caiso_use_mock: true
-  noaa_station_id: "9414290"   # San Francisco, CA
-  caiso_node: "TH_SP15_GEN-APND"
+  caiso_use_mock: false
+  noaa_station_id: "9414290"      # San Francisco, CA
+  caiso_node: "TH_NP15_GEN-APND" # NP15 zone – matches the uploaded CSV
