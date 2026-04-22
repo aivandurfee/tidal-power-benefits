@@ -3,7 +3,8 @@
 # Edit values here; do not hard-code parameters inside modules.
 # -----------------------------------------------------------------------------
 
-# Analysis year and timezone (CAISO is in America/Los_Angeles)
+# Analysis year and timezone (CAISO is in America/Los_Angeles).
+# 2024 is a LEAP year -> expect 8784 hourly rows across all datasets.
 year: 2024
 timezone: "America/Los_Angeles"
 
@@ -18,12 +19,24 @@ paths:
 #   P = 0.5 * rho * A * v^3 * Cp
 # -----------------------------------------------------------------------------
 tidal:
-  rho: 1025.0          # seawater density [kg/m^3]
-  area: 200.0          # swept rotor area [m^2]
-  cp: 0.35             # power coefficient (dimensionless)
-  cut_in_speed: 0.7    # m/s, below which turbine produces 0
-  cut_out_speed: 4.0   # m/s, above which turbine is curtailed
-  rated_power_mw: 1.5  # MW, turbine cap
+  rho: 1025              # seawater density [kg/m^3]
+  cp: 0.4                # power coefficient (dimensionless, <= Betz ~0.59)
+  area: 300.0            # swept rotor area per turbine [m^2]
+  rated_mw: 2.0          # per-turbine rated power cap [MW]
+  cut_in: 0.7            # m/s, below which a turbine produces 0
+  cut_out: 3.0           # m/s, above which a turbine is curtailed
+  # Number of identical turbines in the array.  Representative small
+  # farm: 150 * 2 MW = 300 MW rated, comparable to the full-build
+  # MeyGen (Scotland) plan (~398 MW / ~265 turbines).  Scales total
+  # generation linearly (per-turbine rated cap is applied BEFORE this
+  # multiplier).
+  num_turbines: 150
+  # Geometric amplification for the dh/dt velocity proxy:
+  #   v_current = velocity_scale * (d water_level / dt)
+  # Physically this represents A_basin / A_channel (bay drains through a
+  # narrow inlet).  Typical closed-form values are 5e3 - 2e4; tune in
+  # calibration.  Report this number as a modeling assumption.
+  velocity_scale: 10000.0
 
 # -----------------------------------------------------------------------------
 # Time slice definitions used by src/analysis/time_slices.py
@@ -37,13 +50,15 @@ time_slices:
 # -----------------------------------------------------------------------------
 # Data source toggles
 #
-# caiso_use_mock: false  →  load real data from data/raw/CAISO_2024_combined.csv
-# caiso_use_mock: true   →  fall back to synthetic data (useful for CI / tests)
+# caiso_use_mock: false  -> load real data from data/raw/CAISO_2024_combined.csv
+# caiso_use_mock: true   -> fall back to synthetic data (useful for CI / tests)
 #
-# noaa_use_mock stays true until a live NOAA API fetch is implemented.
+# noaa_use_mock: false   -> hit the live NOAA datagetter API (cached to parquet)
+# noaa_use_mock: true    -> synthetic tidal series for offline runs
 # -----------------------------------------------------------------------------
 sources:
-  noaa_use_mock: true
+  noaa_use_mock: false
   caiso_use_mock: false
   noaa_station_id: "9414290"      # San Francisco, CA
-  caiso_node: "TH_NP15_GEN-APND" # NP15 zone – matches the uploaded CSV
+  noaa_product: "water_level"
+  caiso_node: "TH_NP15_GEN-APND"  # NP15 zone - matches the uploaded CSV
