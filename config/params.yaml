@@ -1,0 +1,44 @@
+# -----------------------------------------------------------------------------
+# Project configuration for the Tidal Power marginal-value analysis.
+# Edit values here; do not hard-code parameters inside modules.
+# -----------------------------------------------------------------------------
+
+# Analysis year and timezone (CAISO is in America/Los_Angeles)
+year: 2023
+timezone: "America/Los_Angeles"
+
+# Input / output paths (relative to repo root)
+paths:
+  raw_dir: "data/raw"
+  processed_dir: "data/processed"
+  output_file: "data/processed/merged_hourly.parquet"
+
+# -----------------------------------------------------------------------------
+# Tidal turbine parameters
+#   P = 0.5 * rho * A * v^3 * Cp
+# -----------------------------------------------------------------------------
+tidal:
+  rho: 1025.0          # seawater density [kg/m^3]
+  area: 200.0          # swept rotor area [m^2]
+  cp: 0.35             # power coefficient (dimensionless)
+  cut_in_speed: 0.7    # m/s, below which turbine produces 0
+  cut_out_speed: 4.0   # m/s, above which turbine is curtailed
+  rated_power_mw: 1.5  # MW, turbine cap
+
+# -----------------------------------------------------------------------------
+# Time slice definitions used by src/analysis/time_slices.py
+# -----------------------------------------------------------------------------
+time_slices:
+  evening_hours: [17, 18, 19, 20, 21]    # 5pm - 9pm local
+  winter_months: [12, 1, 2]
+  summer_months: [6, 7, 8]
+  high_price_quantile: 0.90              # top 10% of hourly prices
+
+# -----------------------------------------------------------------------------
+# Data source toggles -- use mock data until real APIs are wired up.
+# -----------------------------------------------------------------------------
+sources:
+  noaa_use_mock: true
+  caiso_use_mock: true
+  noaa_station_id: "9414290"   # San Francisco, CA
+  caiso_node: "TH_SP15_GEN-APND"
