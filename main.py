@@ -8,7 +8,7 @@ Steps:
     1. Load config (``config/params.yaml``)
     2. Fetch NOAA water-level + velocity for the configured year
     3. Apply the tidal power model  -> datetime | tidal_energy_mwh | capacity_factor
-    4. Fetch + clean CAISO solar/wind/price
+    4. Fetch + clean CAISO solar/wind, merge real LMP prices
     5. Align all sources to an hourly UTC index
     6. Compute value metrics and print a summary table
     7. Persist the merged frame to ``data/processed/``
@@ -67,6 +67,10 @@ def run() -> pd.DataFrame:
     year = int(cfg["year"])
     tz = cfg["timezone"]
 
+    # Resolve the LMP file path (may be None if not set in config).
+    lmp_file_cfg = cfg["paths"].get("lmp_file")
+    lmp_file = root / lmp_file_cfg if lmp_file_cfg else None
+
     log.info("Fetching NOAA tidal data (year=%s, mock=%s, station=%s)",
              year, cfg["sources"]["noaa_use_mock"], cfg["sources"]["noaa_station_id"])
     noaa = fetch_noaa_currents(
@@ -85,13 +89,16 @@ def run() -> pd.DataFrame:
     tidal = compute_tidal_generation(noaa, tidal_params=cfg["tidal"])
     _log_tidal_validation(noaa, tidal, year)
 
-    log.info("Fetching CAISO data (year=%s, mock=%s)",
-             year, cfg["sources"]["caiso_use_mock"])
+    log.info(
+        "Fetching CAISO data (year=%s, mock=%s, lmp_file=%s)",
+        year, cfg["sources"]["caiso_use_mock"], lmp_file,
+    )
     caiso = fetch_caiso_data(
         year=year,
         node=cfg["sources"]["caiso_node"],
         use_mock=cfg["sources"]["caiso_use_mock"],
         raw_dir=raw_dir,
+        lmp_file=lmp_file,
     )
     caiso = clean_caiso(caiso)
 
