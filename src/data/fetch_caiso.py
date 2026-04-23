@@ -1,34 +1,43 @@
-"""Fetch CAISO solar and wind data.
+"""Fetch CAISO solar, wind, and LMP price data.
 
-Real data path:
-    Loads from a pre-downloaded CSV (e.g. CAISO_2024_combined.csv) under
-    ``data/raw``.  The file is expected to have at minimum the columns:
-        - interval_start_utc   (ISO-8601, tz-aware)
-        - solar                (MW)
-        - wind                 (MW)
+Real data path
+--------------
+Generation columns (solar, wind) are loaded from a pre-downloaded CSV
+(``CAISO_<year>_combined.csv``) under ``data/raw``.
 
-    If a ``price_usd_per_mwh`` column is absent the loader synthesises a
-    plausible LMP series so the rest of the pipeline stays functional.
+LMP price column is loaded **separately** from ``LMP_<year>_combined.csv``
+(also under ``data/raw``) via :func:`src.data.fetch_lmp.load_lmp_csv`.
+The two frames are merged on their UTC timestamp before being returned.
 
-Mock data path:
-    Falls back to a synthetic generator so the pipeline runs end-to-end
-    without any files on disk (controlled by ``sources.caiso_use_mock``
-    in ``config/params.yaml``).
+If the LMP file is absent the loader falls back to a synthetic price series
+so the rest of the pipeline stays functional, but a clear warning is emitted.
+
+Mock data path
+--------------
+When ``use_mock=True`` (controlled by ``sources.caiso_use_mock`` in
+``config/params.yaml``), fully synthetic generation AND price data are
+returned.  Useful for CI / tests.
 
 Returned DataFrame columns (all callers depend on these names):
     - timestamp           (tz-aware UTC, used as the join key)
     - solar_mw            (MW, non-negative)
     - wind_mw             (MW, non-negative)
-    - price_usd_per_mwh   ($/MWh, LMP – real or synthesised)
+    - price_usd_per_mwh   ($/MWh, real LMP or synthesised fallback)
 """
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
 import pandas as pd
+
+from src.data.fetch_lmp import load_lmp_csv
+
+
+log = logging.getLogger("tidal_power")
 
 
 # ---------------------------------------------------------------------------
@@ -36,55 +45,90 @@ import pandas as pd
 # ---------------------------------------------------------------------------
 
 def _load_caiso_csv(csv_path: Path) -> pd.DataFrame:
-    """Read a CAISO combined CSV and normalise to the pipeline schema.
+    """Read a CAISO generation CSV and normalise to the pipeline schema.
 
-    Handles:
-    * Negative solar readings (clipped to 0 – occur at night due to
-      meter offsets in the raw CAISO export).
-    * A small number of NaN rows (forward-filled up to 3 h, remainder
-      dropped) – matching the behaviour of ``clean_caiso``.
-    * Missing ``price_usd_per_mwh`` column – synthesised from a simple
-      duck-curve model so downstream value-metric code always has a price
-      series to work with.
+    Returns a frame with columns: ``timestamp``, ``solar_mw``, ``wind_mw``.
+    Price is NOT attached here; the caller merges it from the LMP file.
     """
     df = pd.read_csv(csv_path)
 
-    # ---- timestamp --------------------------------------------------------
     df["timestamp"] = pd.to_datetime(df["interval_start_utc"], utc=True)
-
-    # ---- rename generation columns ----------------------------------------
     df = df.rename(columns={"solar": "solar_mw", "wind": "wind_mw"})
 
-    # ---- keep only the columns the pipeline needs -------------------------
     keep = ["timestamp", "solar_mw", "wind_mw"]
-    if "price_usd_per_mwh" in df.columns:
-        keep.append("price_usd_per_mwh")
     df = df[keep].copy()
 
-    # ---- clip negative generation to 0 ------------------------------------
     df["solar_mw"] = df["solar_mw"].clip(lower=0)
     df["wind_mw"] = df["wind_mw"].clip(lower=0)
 
-    # ---- fill short gaps, drop the rest -----------------------------------
     df = (
         df.sort_values("timestamp")
         .drop_duplicates(subset="timestamp")
         .reset_index(drop=True)
     )
     df = df.set_index("timestamp").ffill(limit=3).dropna().reset_index()
-
-    # ---- synthesise LMP if not present ------------------------------------
-    if "price_usd_per_mwh" not in df.columns:
-        df["price_usd_per_mwh"] = _synthesise_price(df)
-
     return df
 
+
+def _merge_lmp(
+    gen_df: pd.DataFrame,
+    lmp_path: Optional[Path],
+    node: Optional[str],
+) -> pd.DataFrame:
+    """Merge real LMP prices onto the generation frame.
+
+    If ``lmp_path`` is None or the file is missing, falls back to the
+    synthetic duck-curve price series with a warning.
+    """
+    if lmp_path is not None and lmp_path.exists():
+        lmp = load_lmp_csv(lmp_path, node=node)
+        # lmp has columns: timestamp (UTC), price_usd_per_mwh
+        merged = pd.merge(gen_df, lmp, on="timestamp", how="left")
+        missing_price = merged["price_usd_per_mwh"].isna().sum()
+        if missing_price > 0:
+            log.warning(
+                "%d generation rows have no matching LMP timestamp; "
+                "forward-filling up to 3 hours then dropping remainder.",
+                missing_price,
+            )
+            merged = (
+                merged.set_index("timestamp")
+                .ffill(limit=3)
+                .dropna(subset=["price_usd_per_mwh"])
+                .reset_index()
+            )
+        log.info(
+            "LMP merge complete: %d rows retained, "
+            "price range $%.2f – $%.2f/MWh",
+            len(merged),
+            merged["price_usd_per_mwh"].min(),
+            merged["price_usd_per_mwh"].max(),
+        )
+        return merged
+    else:
+        if lmp_path is not None:
+            log.warning(
+                "LMP file not found at %s – falling back to synthetic price. "
+                "Copy LMP_<year>_combined.csv to data/raw/ to use real prices.",
+                lmp_path,
+            )
+        else:
+            log.warning(
+                "No LMP file path configured (paths.lmp_file) – "
+                "falling back to synthetic price."
+            )
+        gen_df["price_usd_per_mwh"] = _synthesise_price(gen_df)
+        return gen_df
+
+
+# ---------------------------------------------------------------------------
+# Synthetic price fallback (CI / mock only)
+# ---------------------------------------------------------------------------
 
 def _synthesise_price(df: pd.DataFrame) -> np.ndarray:
     """Return a plausible hourly LMP series correlated with the duck curve.
 
-    Uses local hour extracted from the UTC timestamp so it works even
-    when the timezone conversion hasn't happened yet.
+    Used ONLY as a fallback when the real LMP file is unavailable.
     """
     rng = np.random.default_rng(seed=99)
     local = df["timestamp"].dt.tz_convert("America/Los_Angeles")
@@ -92,16 +136,14 @@ def _synthesise_price(df: pd.DataFrame) -> np.ndarray:
     solar = df["solar_mw"].to_numpy()
 
     base_price = 45.0
-    # Evening ramp-up (hours 17-21)
     duck_curve = 25 * np.clip(np.sin(np.pi * (hour - 16) / 8), 0, None)
     scarcity = rng.gamma(shape=1.2, scale=6.0, size=len(df))
-    # Solar suppresses midday prices
     price = base_price + duck_curve + scarcity - 0.0015 * solar
     return np.clip(price, -20, 500)
 
 
 # ---------------------------------------------------------------------------
-# Mock / synthetic data (retained for unit-test / CI usage)
+# Mock / synthetic data (for unit-test / CI usage)
 # ---------------------------------------------------------------------------
 
 def _simulate_caiso(year: int, seed: int = 7) -> pd.DataFrame:
@@ -155,23 +197,25 @@ def fetch_caiso_data(
     node: str = "TH_NP15_GEN-APND",
     use_mock: bool = False,
     raw_dir: Optional[str | Path] = None,
+    lmp_file: Optional[str | Path] = None,
 ) -> pd.DataFrame:
-    """Load CAISO hourly solar, wind, and price data.
+    """Load CAISO hourly solar, wind, and LMP price data.
 
     Parameters
     ----------
     year : int
-        Calendar year.  When loading from a CSV the loader accepts any
-        year present in the file; this parameter is used to find the
-        right CSV by convention (``CAISO_<year>_combined.csv``).
+        Calendar year.
     node : str
-        CAISO pricing node label – kept for API compatibility / logging.
+        CAISO pricing node label used to filter the LMP file when it
+        contains multiple nodes.
     use_mock : bool
         If True, return fully synthetic data (useful for CI / tests).
-        Defaults to False so the real CSV is used when available.
     raw_dir : str or Path, optional
-        Directory that contains the raw CSV files.  If omitted the
-        function looks in ``data/raw`` relative to the repo root.
+        Directory that contains the raw CSV files.  Defaults to
+        ``data/raw`` relative to the repo root.
+    lmp_file : str or Path, optional
+        Explicit path to the LMP CSV.  When None, the loader looks for
+        ``LMP_<year>_combined.csv`` inside ``raw_dir``.
 
     Returns
     -------
@@ -182,18 +226,17 @@ def fetch_caiso_data(
     Raises
     ------
     FileNotFoundError
-        If ``use_mock=False`` and no matching CSV is found in ``raw_dir``.
+        If ``use_mock=False`` and no generation CSV is found in ``raw_dir``.
     """
     if use_mock:
         return _simulate_caiso(year=year)
 
-    # ---- locate the CSV ---------------------------------------------------
+    # ---- Resolve raw_dir --------------------------------------------------
     if raw_dir is None:
-        # Default: <repo_root>/data/raw
         raw_dir = Path(__file__).resolve().parents[3] / "data" / "raw"
     raw_dir = Path(raw_dir)
 
-    # Accept the uploaded filename directly or the conventional name.
+    # ---- Locate generation CSV --------------------------------------------
     candidates = [
         raw_dir / f"CAISO_{year}_combined.csv",
         raw_dir / f"caiso_{node}_{year}.csv",
@@ -206,10 +249,20 @@ def fetch_caiso_data(
 
     if csv_path is None:
         raise FileNotFoundError(
-            f"No CAISO CSV found for year={year} in {raw_dir}.\n"
+            f"No CAISO generation CSV found for year={year} in {raw_dir}.\n"
             f"Looked for: {[str(c) for c in candidates]}\n"
             "Copy your CSV there or set sources.caiso_use_mock=true in "
             "config/params.yaml to fall back to synthetic data."
         )
 
-    return _load_caiso_csv(csv_path)
+    # ---- Load generation --------------------------------------------------
+    gen = _load_caiso_csv(csv_path)
+
+    # ---- Resolve LMP file path --------------------------------------------
+    if lmp_file is None:
+        lmp_path: Optional[Path] = raw_dir / f"LMP_{year}_combined.csv"
+    else:
+        lmp_path = Path(lmp_file)
+
+    # ---- Merge real LMP prices -------------------------------------------
+    return _merge_lmp(gen, lmp_path, node=node)
