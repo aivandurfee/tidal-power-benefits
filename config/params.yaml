@@ -13,6 +13,9 @@ paths:
   raw_dir: "data/raw"
   processed_dir: "data/processed"
   output_file: "data/processed/merged_hourly.parquet"
+  # Real LMP price file.  Set to null to fall back to synthetic prices.
+  # Expected location: data/raw/LMP_2024_combined.csv
+  lmp_file: "data/raw/LMP_2024_combined.csv"
 
 # -----------------------------------------------------------------------------
 # Tidal turbine parameters
